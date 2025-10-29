@@ -1,7 +1,5 @@
-# app.py
 from flask import Flask, request, jsonify, render_template_string
 import sqlite3
-import decimal
 
 app = Flask(__name__)
 
@@ -11,13 +9,15 @@ TEMPLATE = """
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Mini Expense Tracker</title>
+  <title>Mini Expense Tracker by Het</title>
   <style>
     body { font-family: Inter, system-ui, -apple-system, Arial; max-width: 720px; margin: 36px auto; padding: 0 16px; color:#111; }
     h1 { margin-bottom: 6px; }
     form { display:flex; gap:8px; margin-bottom:18px; align-items:center; }
     input[type="text"], input[type="number"] { padding:8px 10px; font-size:16px; border:1px solid #ddd; border-radius:6px; }
-    button { padding:9px 12px; border-radius:8px; border:none; background:#0b74ff; color:white; font-weight:600; cursor:pointer; }
+    button { padding:9px 12px; border-radius:6px; border:none; background:#0b74ff; color:white; font-weight:600; cursor:pointer; }
+    button.delete { background:#e74c3c; }
+    button.clear { background:#555; margin-top:10px; }
     table { width:100%; border-collapse:collapse; margin-top:14px; }
     th, td { text-align:left; padding:8px; border-bottom:1px solid #eee; }
     tfoot td { font-weight:700; }
@@ -26,8 +26,8 @@ TEMPLATE = """
   </style>
 </head>
 <body>
-  <h1>Mini Expense Tracker</h1>
-  <p class="muted">Add an expense (name + amount). Data is stored in a local SQLite database.</p>
+  <h1>Mini Expense Tracker by Het</h1>
+  <p class="muted">Add, delete, or clear all expenses. Data is stored locally in SQLite.</p>
 
   <form id="expense-form">
     <input id="name" type="text" placeholder="Expense name (e.g., Coffee)" required />
@@ -39,13 +39,15 @@ TEMPLATE = """
 
   <table id="expenses-table" aria-live="polite">
     <thead>
-      <tr><th>Item</th><th>Amount</th></tr>
+      <tr><th>Item</th><th>Amount</th><th></th></tr>
     </thead>
     <tbody id="expenses-body"></tbody>
     <tfoot>
-      <tr><td>Total</td><td id="total-amount">$0.00</td></tr>
+      <tr><td>Total</td><td id="total-amount">$0.00</td><td></td></tr>
     </tfoot>
   </table>
+
+  <button class="clear" id="clear-all">Clear All</button>
 
 <script>
 async function fetchExpenses() {
@@ -56,19 +58,26 @@ async function fetchExpenses() {
     tbody.innerHTML = '';
     data.expenses.forEach(e => {
       const tr = document.createElement('tr');
-      const nameTd = document.createElement('td');
-      nameTd.textContent = e.name;
-      const amountTd = document.createElement('td');
-      amountTd.textContent = '$' + Number(e.amount).toFixed(2);
-      tr.appendChild(nameTd);
-      tr.appendChild(amountTd);
+      tr.innerHTML = `
+        <td>${e.name}</td>
+        <td>$${Number(e.amount).toFixed(2)}</td>
+        <td><button class="delete" data-id="${e.id}">Delete</button></td>
+      `;
       tbody.appendChild(tr);
     });
+
+    // delete buttons
+    document.querySelectorAll('.delete').forEach(btn => {
+      btn.onclick = async () => {
+        await fetch('/expenses/' + btn.dataset.id, { method: 'DELETE' });
+        fetchExpenses();
+      };
+    });
+
     document.getElementById('total-amount').textContent = '$' + Number(data.total).toFixed(2);
   } catch (err) {
     document.getElementById('message').textContent = 'Failed to load expenses.';
     document.getElementById('message').classList.add('error');
-    console.error(err);
   }
 }
 
@@ -78,33 +87,27 @@ document.getElementById('expense-form').addEventListener('submit', async (e) => 
   const amount = document.getElementById('amount').value;
   if (!name || amount === '') return;
 
-  try {
-    const res = await fetch('/expenses', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, amount: Number(amount) })
-    });
-    if (!res.ok) {
-      const err = await res.json();
-      document.getElementById('message').textContent = err.message || 'Failed to add';
-      document.getElementById('message').classList.add('error');
-      return;
-    }
-    // clear form
+  const res = await fetch('/expenses', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, amount: Number(amount) })
+  });
+
+  if (res.ok) {
     document.getElementById('name').value = '';
     document.getElementById('amount').value = '';
     document.getElementById('message').textContent = 'Added ✓';
-    document.getElementById('message').classList.remove('error');
     setTimeout(() => { document.getElementById('message').textContent = ''; }, 1800);
-    await fetchExpenses();
-  } catch (err) {
-    document.getElementById('message').textContent = 'Network error';
-    document.getElementById('message').classList.add('error');
-    console.error(err);
+    fetchExpenses();
   }
 });
 
-// initial load
+document.getElementById('clear-all').addEventListener('click', async () => {
+  await fetch('/expenses', { method: 'DELETE' });
+  fetchExpenses();
+});
+
+// Initial load
 fetchExpenses();
 </script>
 </body>
@@ -120,14 +123,14 @@ def get_db():
 def index():
     return render_template_string(TEMPLATE)
 
-@app.route("/expenses", methods=["GET", "POST"])
+@app.route("/expenses", methods=["GET", "POST", "DELETE"])
 def expenses():
     conn = get_db()
     cur = conn.cursor()
+
     if request.method == "POST":
         data = request.get_json() or {}
         name = (data.get("name") or "").strip()
-        # ensure decimal-handling for money
         try:
             amount = float(data.get("amount"))
         except (TypeError, ValueError):
@@ -138,14 +141,26 @@ def expenses():
         conn.commit()
         return jsonify({"message": "Added"}), 201
 
+    if request.method == "DELETE":
+        cur.execute("DELETE FROM expenses")
+        conn.commit()
+        return jsonify({"message": "All cleared"}), 200
+
     # GET
     cur.execute("SELECT id, name, amount FROM expenses ORDER BY id DESC")
     rows = [dict(r) for r in cur.fetchall()]
     total = sum(float(r["amount"]) for r in rows)
     return jsonify({"expenses": rows, "total": total})
 
+@app.route("/expenses/<int:expense_id>", methods=["DELETE"])
+def delete_expense(expense_id):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+    conn.commit()
+    return jsonify({"message": "Deleted"}), 200
+
 if __name__ == "__main__":
-    # create table if not exists
     conn = get_db()
     conn.execute("""
     CREATE TABLE IF NOT EXISTS expenses (
@@ -157,6 +172,4 @@ if __name__ == "__main__":
     """)
     conn.commit()
     conn.close()
-
-    # Run dev server
     app.run(debug=True, host="0.0.0.0", port=5000)
