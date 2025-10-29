@@ -17,7 +17,7 @@ def expenses():
         cur.execute("INSERT INTO expenses (name, amount) VALUES (?, ?)", 
                     (data["name"], data["amount"]))
         conn.commit()
-        return jsonify({"message": "Added"}), 201
+        return jsonify({"message": "Added the item"}), 201
     else:
         cur.execute("SELECT * FROM expenses")
         rows = [dict(row) for row in cur.fetchall()]
