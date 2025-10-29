@@ -16,6 +16,7 @@ TEMPLATE = """
     form { display:flex; gap:8px; margin-bottom:18px; align-items:center; }
     input[type="text"], input[type="number"] { padding:8px 10px; font-size:16px; border:1px solid #ddd; border-radius:6px; }
     button { padding:9px 12px; border-radius:6px; border:none; background:#0b74ff; color:white; font-weight:600; cursor:pointer; }
+    button.edit { background:#f39c12; }
     button.delete { background:#e74c3c; }
     button.clear { background:#555; margin-top:10px; }
     table { width:100%; border-collapse:collapse; margin-top:14px; }
@@ -27,7 +28,7 @@ TEMPLATE = """
 </head>
 <body>
   <h1>Mini Expense Tracker by Het</h1>
-  <p class="muted">Add, delete, or clear all expenses. Data is stored locally in SQLite.</p>
+  <p class="muted">Add, edit, delete, or clear all expenses. Data is stored locally in SQLite.</p>
 
   <form id="expense-form">
     <input id="name" type="text" placeholder="Expense name (e.g., Coffee)" required />
@@ -39,7 +40,7 @@ TEMPLATE = """
 
   <table id="expenses-table" aria-live="polite">
     <thead>
-      <tr><th>Item</th><th>Amount</th><th></th></tr>
+      <tr><th>Item</th><th>Amount</th><th>Actions</th></tr>
     </thead>
     <tbody id="expenses-body"></tbody>
     <tfoot>
@@ -56,52 +57,84 @@ async function fetchExpenses() {
     const data = await res.json();
     const tbody = document.getElementById('expenses-body');
     tbody.innerHTML = '';
+
+    if (data.expenses.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="3" class="muted">No expenses yet.</td></tr>';
+    }
+
     data.expenses.forEach(e => {
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td>${e.name}</td>
         <td>$${Number(e.amount).toFixed(2)}</td>
-        <td><button class="delete" data-id="${e.id}">Delete</button></td>
+        <td>
+          <button class="edit" data-id="${e.id}" data-name="${e.name}" data-amount="${e.amount}">Edit</button>
+          <button class="delete" data-id="${e.id}">Delete</button>
+        </td>
       `;
       tbody.appendChild(tr);
     });
 
-    // delete buttons
-    document.querySelectorAll('.delete').forEach(btn => {
-      btn.onclick = async () => {
-        await fetch('/expenses/' + btn.dataset.id, { method: 'DELETE' });
-        fetchExpenses();
-      };
-    });
-
     document.getElementById('total-amount').textContent = '$' + Number(data.total).toFixed(2);
   } catch (err) {
-    document.getElementById('message').textContent = 'Failed to load expenses.';
-    document.getElementById('message').classList.add('error');
+    console.error('Error fetching expenses:', err);
   }
 }
 
-document.getElementById('expense-form').addEventListener('submit', async (e) => {
+// Handle add/update
+document.getElementById('expense-form').addEventListener('submit', async function (e) {
   e.preventDefault();
-  const name = document.getElementById('name').value.trim();
-  const amount = document.getElementById('amount').value;
-  if (!name || amount === '') return;
+  const nameInput = document.getElementById('name');
+  const amountInput = document.getElementById('amount');
+  const submitButton = e.target.querySelector('button[type="submit"]');
 
-  const res = await fetch('/expenses', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, amount: Number(amount) })
-  });
+  const name = nameInput.value.trim();
+  const amount = parseFloat(amountInput.value);
+  if (!name || isNaN(amount)) return;
 
-  if (res.ok) {
-    document.getElementById('name').value = '';
-    document.getElementById('amount').value = '';
-    document.getElementById('message').textContent = 'Added ✓';
-    setTimeout(() => { document.getElementById('message').textContent = ''; }, 1800);
+  if (submitButton.dataset.editing) {
+    const id = submitButton.dataset.editing;
+    await fetch('/expenses/' + id, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, amount }),
+    });
+    submitButton.textContent = 'Add';
+    delete submitButton.dataset.editing;
+  } else {
+    await fetch('/expenses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, amount }),
+    });
+  }
+
+  nameInput.value = '';
+  amountInput.value = '';
+  fetchExpenses();
+});
+
+// Handle edit & delete buttons
+document.getElementById('expenses-body').addEventListener('click', async function (e) {
+  if (e.target.classList.contains('edit')) {
+    const id = e.target.dataset.id;
+    const name = e.target.dataset.name;
+    const amount = e.target.dataset.amount;
+
+    document.getElementById('name').value = name;
+    document.getElementById('amount').value = amount;
+
+    const submitButton = document.querySelector('#expense-form button[type="submit"]');
+    submitButton.textContent = 'Update';
+    submitButton.dataset.editing = id;
+  } else if (e.target.classList.contains('delete')) {
+    const id = e.target.dataset.id;
+    await fetch('/expenses/' + id, { method: 'DELETE' });
     fetchExpenses();
   }
 });
 
+// Clear all
 document.getElementById('clear-all').addEventListener('click', async () => {
   await fetch('/expenses', { method: 'DELETE' });
   fetchExpenses();
@@ -114,6 +147,7 @@ fetchExpenses();
 </html>
 """
 
+# Database helper
 def get_db():
     conn = sqlite3.connect("data.db", detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
     conn.row_factory = sqlite3.Row
@@ -152,13 +186,28 @@ def expenses():
     total = sum(float(r["amount"]) for r in rows)
     return jsonify({"expenses": rows, "total": total})
 
-@app.route("/expenses/<int:expense_id>", methods=["DELETE"])
-def delete_expense(expense_id):
+@app.route("/expenses/<int:expense_id>", methods=["DELETE", "PUT"])
+def modify_expense(expense_id):
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
-    conn.commit()
-    return jsonify({"message": "Deleted"}), 200
+
+    if request.method == "DELETE":
+        cur.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+        conn.commit()
+        return jsonify({"message": "Deleted"}), 200
+
+    if request.method == "PUT":
+        data = request.get_json() or {}
+        name = (data.get("name") or "").strip()
+        try:
+            amount = float(data.get("amount"))
+        except (TypeError, ValueError):
+            return jsonify({"message": "Invalid amount"}), 400
+        if not name:
+            return jsonify({"message": "Name required"}), 400
+        cur.execute("UPDATE expenses SET name = ?, amount = ? WHERE id = ?", (name, amount, expense_id))
+        conn.commit()
+        return jsonify({"message": "Updated"}), 200
 
 if __name__ == "__main__":
     conn = get_db()
